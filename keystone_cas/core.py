@@ -41,6 +41,9 @@ opts = [
                 default="",
                 help="If specified users will be automatically "
                      "added to this tenant."),
+    cfg.StrOpt("cas_server_url",
+                default="",
+                help="URL of the cas server")
 ]
 CONF.register_opts(opts, group="cas")
 
@@ -64,21 +67,14 @@ class CASAuthMiddleware(wsgi.Middleware):
             return cls(app, **local_config)
         return _factory
 
-    def _validate_cas_ticket(self, ticket, service, server):
+    def _validate_cas_ticket(self, ticket, service):
         params = {'ticket': ticket, 'service': service}
-        url = (urljoin(server, 'proxyValidate') + '?' +
+        url = (urljoin(CONF.cas.cas_server_url, 'proxyValidate') + '?' +
                urlencode(params))
         page = urlopen(url)
         try:
             response = page.read()
             tree = ElementTree.fromstring(response)
-
-            #Useful for debugging
-            from xml.dom.minidom import parseString
-            #from xml.etree import ElementTree
-            txt = ElementTree.tostring(tree)
-            print parseString(txt).toprettyxml()
-        
             if tree[0].tag.endswith('authenticationSuccess'):
                 return {'name': tree[0][0].text}
             else:
@@ -126,9 +122,14 @@ class CASAuthMiddleware(wsgi.Middleware):
             return True
         return False
 
+    def _get_login_url(self, service):
+        params = {'service': service}
+        #if settings.CAS_EXTRA_LOGIN_PARAMS:
+        #    params.update(settings.CAS_EXTRA_LOGIN_PARAMS)
+        return (urljoin(CONF.cas.cas_server_url, 'login')
+                + '?' + urlencode(params))
+
     def process_request(self, request):
-        LOG.debug("*" * 80)
-        LOG.debug("HERE!")
         if request.environ.get('REMOTE_USER', None) is not None:
             # authenticated upstream
             return self.application
@@ -137,12 +138,17 @@ class CASAuthMiddleware(wsgi.Middleware):
             return self.application
 
         params = request.environ.get(PARAMS_ENV)
+        casCredentials = params["auth"]["casCredentials"]
+         
+        ticket = casCredentials.get("ticket", None)
+        service = casCredentials.get("service", None)
 
-        ticket = params["auth"]["casCredentials"]["ticket"]
-        service = params["auth"]["casCredentials"]["service"]
-        server = params["auth"]["casCredentials"]["server"]
+        if not ticket:
+            # this is asking for the server_url
+            return wsgi.render_response({"cas_login_url":
+                                         self._get_login_url(service)}) 
 
-        user_ref = self._validate_cas_ticket(ticket, service, server)
+        user_ref = self._validate_cas_ticket(ticket, service)
         if not user_ref:
             # Wrong authentication? 
             return self.application
